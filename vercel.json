@@ -24,6 +24,10 @@
       "dest": "/api/admin.py"
     },
     {
+      "src": "/debug-keys",
+      "dest": "/api/index.py"
+    },
+    {
       "src": "/",
       "dest": "/api/admin.py"
     }
