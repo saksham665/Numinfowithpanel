@@ -2,7 +2,7 @@
 Vercel-compatible Flask API for phone number lookup with database integration
 """
 from flask import Flask, request, Response
-import requests, re, html, binascii, json, logging, sqlite3
+import requests, re, html, binascii, json, logging, sqlite3, os
 from bs4 import BeautifulSoup
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
@@ -34,9 +34,14 @@ BASE_HEADERS = {
 
 EMOJI_RE = re.compile(r"[\U0001F000-\U0010FFFF]+", flags=re.UNICODE)
 
-# Database setup
+# Database setup - Use absolute path in Vercel
+def get_db_path():
+    return '/tmp/wrapped_api.db'
+
 def init_db():
-    conn = get_db_connection()
+    db_path = get_db_path()
+    print(f"Initializing database at: {db_path}")  # Debug
+    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
     cursor.execute('''
@@ -62,20 +67,35 @@ def init_db():
         )
     ''')
     
+    # Check if we have any keys
+    cursor.execute('SELECT COUNT(*) FROM api_keys')
+    count = cursor.fetchone()[0]
+    print(f"Total keys in database: {count}")  # Debug
+    
     conn.commit()
     conn.close()
 
 def get_db_connection():
-    return sqlite3.connect('/tmp/wrapped_api.db')
+    return sqlite3.connect(get_db_path())
 
 def validate_api_key(api_key):
     """
     Validate API key from database
-    Returns: (is_valid, key_data) 
+    Returns: (is_valid, key_data, error_message) 
     """
+    if not api_key:
+        return False, None, "API key is required"
+    
+    print(f"Validating API key: {api_key}")  # Debug
+    
     conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
+    
+    # First, let's see what keys we have in database
+    cursor.execute('SELECT key_text, active FROM api_keys')
+    all_keys = cursor.fetchall()
+    print(f"All keys in DB: {[dict(row) for row in all_keys]}")  # Debug
     
     cursor.execute('''
         SELECT * FROM api_keys 
@@ -87,7 +107,10 @@ def validate_api_key(api_key):
     
     if not key_data:
         conn.close()
-        return False, None
+        print(f"Key not found or inactive: {api_key}")  # Debug
+        return False, None, "API key not found or inactive"
+    
+    print(f"Key found: {dict(key_data)}")  # Debug
     
     # Check daily limit
     if key_data['daily_limit'] > 0:
@@ -97,15 +120,19 @@ def validate_api_key(api_key):
         ''', (key_data['id'],))
         used_today = cursor.fetchone()[0]
         
+        print(f"Used today: {used_today}, Limit: {key_data['daily_limit']}")  # Debug
+        
         if used_today >= key_data['daily_limit']:
             conn.close()
-            return False, key_data
+            return False, key_data, f"Daily limit exceeded. Used: {used_today}/{key_data['daily_limit']}"
     
     conn.close()
-    return True, key_data
+    return True, key_data, None
 
 def log_usage(api_key_id, phone_number):
     """Log API usage to database"""
+    print(f"Logging usage for key_id: {api_key_id}, phone: {phone_number}")  # Debug
+    
     conn = get_db_connection()
     cursor = conn.cursor()
     
@@ -121,6 +148,7 @@ def log_usage(api_key_id, phone_number):
     
     conn.commit()
     conn.close()
+    print("Usage logged successfully")  # Debug
 
 def clean_text(t):
     if not t:
@@ -184,25 +212,11 @@ def fetch():
     provided_key = request.args.get("key", "").strip()
     num = request.args.get("num", "").strip()
 
+    print(f"API Request - Key: {provided_key}, Number: {num}")  # Debug
+
     # Validate API key from database
-    is_valid, key_data = validate_api_key(provided_key)
+    is_valid, key_data, error_msg = validate_api_key(provided_key)
     if not is_valid:
-        error_msg = "Invalid or missing API key."
-        if key_data:
-            # Key exists but limit exceeded or expired
-            if key_data['daily_limit'] > 0:
-                conn = get_db_connection()
-                cursor = conn.cursor()
-                cursor.execute('''
-                    SELECT COUNT(*) FROM usage_logs 
-                    WHERE api_key_id = ? AND date(used_at) = date('now')
-                ''', (key_data['id'],))
-                used_today = cursor.fetchone()[0]
-                conn.close()
-                error_msg = f"Daily limit exceeded. Used: {used_today}/{key_data['daily_limit']}"
-            elif key_data['expiry_date'] and key_data['expiry_date'] < datetime.now().strftime('%Y-%m-%d'):
-                error_msg = "API key has expired."
-        
         return make_json_response({"ok": False, "error": error_msg}, status=401)
 
     # Validate phone number
@@ -262,6 +276,30 @@ def home_redirect():
     """Redirect root to admin panel"""
     from flask import redirect
     return redirect("/admin")
+
+@app.route("/debug-db", methods=["GET"])
+def debug_db():
+    """Debug endpoint to check database state"""
+    conn = get_db_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    # Get all keys
+    cursor.execute('SELECT * FROM api_keys')
+    keys = [dict(row) for row in cursor.fetchall()]
+    
+    # Get usage stats
+    cursor.execute('SELECT COUNT(*) as total_logs FROM usage_logs')
+    total_logs = cursor.fetchone()[0]
+    
+    conn.close()
+    
+    return {
+        "database_path": get_db_path(),
+        "total_keys": len(keys),
+        "total_usage_logs": total_logs,
+        "keys": keys
+    }
 
 # Initialize database on startup
 init_db()
