@@ -15,66 +15,78 @@ ADMIN_PASS = 'SakshamXKt'
 def get_db_path():
     return '/tmp/wrapped_api.db'
 
-def init_db():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS api_keys (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            key_text TEXT UNIQUE,
-            daily_limit INTEGER DEFAULT 0,
-            used_today INTEGER DEFAULT 0,
-            total_used INTEGER DEFAULT 0,
-            last_used TEXT DEFAULT '',
-            expiry_date TEXT DEFAULT '',
-            active INTEGER DEFAULT 1,
-            created_at TEXT DEFAULT (datetime('now'))
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS usage_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            api_key_id INTEGER,
-            phone TEXT,
-            used_at TEXT DEFAULT (datetime('now'))
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
-
 def get_db_connection():
-    return sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    """Initialize database tables"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_text TEXT UNIQUE,
+                daily_limit INTEGER DEFAULT 0,
+                used_today INTEGER DEFAULT 0,
+                total_used INTEGER DEFAULT 0,
+                last_used TEXT DEFAULT '',
+                expiry_date TEXT DEFAULT '',
+                active INTEGER DEFAULT 1,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS usage_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                api_key_id INTEGER,
+                phone TEXT,
+                used_at TEXT DEFAULT (datetime('now'))
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        print("✅ Admin: Database initialized successfully")
+    except Exception as e:
+        print(f"❌ Admin: Database initialization failed: {e}")
 
 def calculate_usage_stats():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Get all keys
-    cursor.execute('SELECT id FROM api_keys')
-    keys = cursor.fetchall()
-    
-    for key_id, in keys:
-        # Calculate used today
-        cursor.execute('''
-            SELECT COUNT(*) FROM usage_logs 
-            WHERE api_key_id = ? AND date(used_at) = date('now')
-        ''', (key_id,))
-        used_today = cursor.fetchone()[0]
+    """Calculate and update usage statistics"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
         
-        # Calculate total used
-        cursor.execute('SELECT COUNT(*) FROM usage_logs WHERE api_key_id = ?', (key_id,))
-        total_used = cursor.fetchone()[0]
+        # Get all keys
+        cursor.execute('SELECT id FROM api_keys')
+        keys = cursor.fetchall()
         
-        # Update the key stats
-        cursor.execute('''
-            UPDATE api_keys SET used_today = ?, total_used = ? WHERE id = ?
-        ''', (used_today, total_used, key_id))
-    
-    conn.commit()
-    conn.close()
+        for key_id, in keys:
+            # Calculate used today
+            cursor.execute('''
+                SELECT COUNT(*) FROM usage_logs 
+                WHERE api_key_id = ? AND date(used_at) = date('now')
+            ''', (key_id,))
+            used_today = cursor.fetchone()[0]
+            
+            # Calculate total used
+            cursor.execute('SELECT COUNT(*) FROM usage_logs WHERE api_key_id = ?', (key_id,))
+            total_used = cursor.fetchone()[0]
+            
+            # Update the key stats
+            cursor.execute('''
+                UPDATE api_keys SET used_today = ?, total_used = ? WHERE id = ?
+            ''', (used_today, total_used, key_id))
+        
+        conn.commit()
+        conn.close()
+        print("✅ Admin: Usage stats updated")
+    except Exception as e:
+        print(f"❌ Admin: Error updating usage stats: {e}")
 
 # HTML Templates with exact same design
 LOGIN_HTML = '''
@@ -249,8 +261,6 @@ def admin_panel():
     
     # Admin panel functionality
     msg = ''
-    conn = get_db_connection()
-    conn.row_factory = sqlite3.Row
     
     # Handle POST actions
     if request.method == 'POST':
@@ -269,13 +279,15 @@ def admin_panel():
                     expiry_date = (datetime.now() + timedelta(days=30*expiry_months)).strftime('%Y-%m-%d')
                 
                 try:
+                    conn = get_db_connection()
                     cursor = conn.cursor()
                     cursor.execute('''
                         INSERT OR IGNORE INTO api_keys (key_text, daily_limit, expiry_date, active) 
                         VALUES (?, ?, ?, 1)
                     ''', (key_text, daily_limit, expiry_date))
                     conn.commit()
-                    msg = 'Key created'
+                    conn.close()
+                    msg = 'Key created successfully'
                 except sqlite3.IntegrityError:
                     msg = 'Key already exists'
                 except Exception as e:
@@ -283,29 +295,36 @@ def admin_panel():
         
         elif action == 'toggle' and request.form.get('id'):
             key_id = int(request.form.get('id'))
-            cursor = conn.cursor()
-            cursor.execute('SELECT active FROM api_keys WHERE id = ?', (key_id,))
-            result = cursor.fetchone()
-            
-            if result:
-                new_status = 0 if result[0] else 1
-                cursor.execute('UPDATE api_keys SET active = ? WHERE id = ?', (new_status, key_id))
-                conn.commit()
-                msg = 'Key updated'
-            else:
-                msg = 'Key not found'
+            try:
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute('SELECT active FROM api_keys WHERE id = ?', (key_id,))
+                result = cursor.fetchone()
+                
+                if result:
+                    new_status = 0 if result[0] else 1
+                    cursor.execute('UPDATE api_keys SET active = ? WHERE id = ?', (new_status, key_id))
+                    conn.commit()
+                    msg = 'Key updated successfully'
+                else:
+                    msg = 'Key not found'
+                conn.close()
+            except Exception as e:
+                msg = f'Error updating key: {str(e)}'
         
         elif action == 'delete' and request.form.get('id'):
             key_id = int(request.form.get('id'))
-            cursor = conn.cursor()
-            
             try:
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                
                 # Delete usage logs first
                 cursor.execute('DELETE FROM usage_logs WHERE api_key_id = ?', (key_id,))
                 # Delete key
                 cursor.execute('DELETE FROM api_keys WHERE id = ?', (key_id,))
                 conn.commit()
-                msg = 'Key deleted'
+                conn.close()
+                msg = 'Key deleted successfully'
             except Exception as e:
                 msg = f'Error deleting key: {str(e)}'
     
@@ -313,10 +332,15 @@ def admin_panel():
     calculate_usage_stats()
     
     # Fetch all keys
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM api_keys ORDER BY id DESC')
-    keys = [dict(row) for row in cursor.fetchall()]
-    conn.close()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM api_keys ORDER BY id DESC')
+        keys = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+    except Exception as e:
+        keys = []
+        msg = f'Error fetching keys: {str(e)}'
     
     # Generate endpoint URL
     base_url = request.host_url.rstrip('/')
@@ -330,26 +354,31 @@ def admin_panel():
 @app.route("/debug-db", methods=["GET"])
 def debug_db():
     """Debug endpoint to check database state"""
-    conn = get_db_connection()
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
-    # Get all keys
-    cursor.execute('SELECT * FROM api_keys')
-    keys = [dict(row) for row in cursor.fetchall()]
-    
-    # Get usage stats
-    cursor.execute('SELECT COUNT(*) as total_logs FROM usage_logs')
-    total_logs = cursor.fetchone()[0]
-    
-    conn.close()
-    
-    return {
-        "database_path": get_db_path(),
-        "total_keys": len(keys),
-        "total_usage_logs": total_logs,
-        "keys": keys
-    }
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Get all keys
+        cursor.execute('SELECT * FROM api_keys')
+        keys = [dict(row) for row in cursor.fetchall()]
+        
+        # Get usage stats
+        cursor.execute('SELECT COUNT(*) as total_logs FROM usage_logs')
+        total_logs = cursor.fetchone()[0]
+        
+        conn.close()
+        
+        return {
+            "database_path": get_db_path(),
+            "total_keys": len(keys),
+            "total_usage_logs": total_logs,
+            "keys": keys
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e)
+        }, 500
 
 # Initialize database on startup
 init_db()
