@@ -11,9 +11,12 @@ app.secret_key = 'your-secret-key-change-in-production'
 ADMIN_USER = 'Saksham'
 ADMIN_PASS = 'SakshamXKt'
 
-# Database setup
+# Database setup - Shared between admin and API
+def get_db_path():
+    return '/tmp/wrapped_api.db'
+
 def init_db():
-    conn = sqlite3.connect('/tmp/wrapped_api.db')
+    conn = get_db_connection()
     cursor = conn.cursor()
     
     cursor.execute('''
@@ -42,7 +45,36 @@ def init_db():
     conn.commit()
     conn.close()
 
-init_db()
+def get_db_connection():
+    return sqlite3.connect(get_db_path())
+
+def calculate_usage_stats():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Get all keys
+    cursor.execute('SELECT id FROM api_keys')
+    keys = cursor.fetchall()
+    
+    for key_id, in keys:
+        # Calculate used today
+        cursor.execute('''
+            SELECT COUNT(*) FROM usage_logs 
+            WHERE api_key_id = ? AND date(used_at) = date('now')
+        ''', (key_id,))
+        used_today = cursor.fetchone()[0]
+        
+        # Calculate total used
+        cursor.execute('SELECT COUNT(*) FROM usage_logs WHERE api_key_id = ?', (key_id,))
+        total_used = cursor.fetchone()[0]
+        
+        # Update the key stats
+        cursor.execute('''
+            UPDATE api_keys SET used_today = ?, total_used = ? WHERE id = ?
+        ''', (used_today, total_used, key_id))
+    
+    conn.commit()
+    conn.close()
 
 # HTML Templates with exact same design
 LOGIN_HTML = '''
@@ -191,37 +223,6 @@ ADMIN_HTML = '''
 </html>
 '''
 
-def get_db_connection():
-    return sqlite3.connect('/tmp/wrapped_api.db')
-
-def calculate_usage_stats():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Get all keys
-    cursor.execute('SELECT id FROM api_keys')
-    keys = cursor.fetchall()
-    
-    for key_id, in keys:
-        # Calculate used today
-        cursor.execute('''
-            SELECT COUNT(*) FROM usage_logs 
-            WHERE api_key_id = ? AND date(used_at) = date('now')
-        ''', (key_id,))
-        used_today = cursor.fetchone()[0]
-        
-        # Calculate total used
-        cursor.execute('SELECT COUNT(*) FROM usage_logs WHERE api_key_id = ?', (key_id,))
-        total_used = cursor.fetchone()[0]
-        
-        # Update the key stats
-        cursor.execute('''
-            UPDATE api_keys SET used_today = ?, total_used = ? WHERE id = ?
-        ''', (used_today, total_used, key_id))
-    
-    conn.commit()
-    conn.close()
-
 @app.route('/admin', methods=['GET', 'POST'])
 @app.route('/', methods=['GET', 'POST'])
 def admin_panel():
@@ -277,6 +278,8 @@ def admin_panel():
                     msg = 'Key created'
                 except sqlite3.IntegrityError:
                     msg = 'Key already exists'
+                except Exception as e:
+                    msg = f'Error creating key: {str(e)}'
         
         elif action == 'toggle' and request.form.get('id'):
             key_id = int(request.form.get('id'))
@@ -289,17 +292,22 @@ def admin_panel():
                 cursor.execute('UPDATE api_keys SET active = ? WHERE id = ?', (new_status, key_id))
                 conn.commit()
                 msg = 'Key updated'
+            else:
+                msg = 'Key not found'
         
         elif action == 'delete' and request.form.get('id'):
             key_id = int(request.form.get('id'))
             cursor = conn.cursor()
             
-            # Delete usage logs first
-            cursor.execute('DELETE FROM usage_logs WHERE api_key_id = ?', (key_id,))
-            # Delete key
-            cursor.execute('DELETE FROM api_keys WHERE id = ?', (key_id,))
-            conn.commit()
-            msg = 'Key deleted'
+            try:
+                # Delete usage logs first
+                cursor.execute('DELETE FROM usage_logs WHERE api_key_id = ?', (key_id,))
+                # Delete key
+                cursor.execute('DELETE FROM api_keys WHERE id = ?', (key_id,))
+                conn.commit()
+                msg = 'Key deleted'
+            except Exception as e:
+                msg = f'Error deleting key: {str(e)}'
     
     # Recalculate usage stats
     calculate_usage_stats()
@@ -319,6 +327,33 @@ def admin_panel():
                                 keys=keys, 
                                 endpoint_url=endpoint_url)
 
-# Vercel requirement
+@app.route("/debug-db", methods=["GET"])
+def debug_db():
+    """Debug endpoint to check database state"""
+    conn = get_db_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    # Get all keys
+    cursor.execute('SELECT * FROM api_keys')
+    keys = [dict(row) for row in cursor.fetchall()]
+    
+    # Get usage stats
+    cursor.execute('SELECT COUNT(*) as total_logs FROM usage_logs')
+    total_logs = cursor.fetchone()[0]
+    
+    conn.close()
+    
+    return {
+        "database_path": get_db_path(),
+        "total_keys": len(keys),
+        "total_usage_logs": total_logs,
+        "keys": keys
+    }
+
+# Initialize database on startup
+init_db()
+
+# Vercel requires this
 if __name__ == '__main__':
     app.run(debug=False)
