@@ -2,7 +2,7 @@
 Vercel-compatible Flask API for phone number lookup with database integration
 """
 from flask import Flask, request, Response
-import requests, re, html, binascii, json, logging, sqlite3, os
+import requests, re, html, binascii, json, logging, sqlite3
 from bs4 import BeautifulSoup
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
@@ -38,40 +38,10 @@ EMOJI_RE = re.compile(r"[\U0001F000-\U0010FFFF]+", flags=re.UNICODE)
 def get_db_path():
     return '/tmp/wrapped_api.db'
 
-def init_db():
-    db_path = get_db_path()
-    print(f"Initializing database at: {db_path}")
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS api_keys (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            key_text TEXT UNIQUE,
-            daily_limit INTEGER DEFAULT 0,
-            used_today INTEGER DEFAULT 0,
-            total_used INTEGER DEFAULT 0,
-            last_used TEXT DEFAULT '',
-            expiry_date TEXT DEFAULT '',
-            active INTEGER DEFAULT 1,
-            created_at TEXT DEFAULT (datetime('now'))
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS usage_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            api_key_id INTEGER,
-            phone TEXT,
-            used_at TEXT DEFAULT (datetime('now'))
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
-
 def get_db_connection():
-    return sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def validate_api_key(api_key):
     """
@@ -81,18 +51,12 @@ def validate_api_key(api_key):
     if not api_key:
         return False, None, "API key is required"
     
-    print(f"Validating API key: {api_key}")
+    print(f"🔑 Validating API key: '{api_key}'")
     
     conn = get_db_connection()
-    conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
-    # Debug: Print all keys in database
-    cursor.execute('SELECT key_text, active, expiry_date FROM api_keys')
-    all_keys = cursor.fetchall()
-    print(f"All keys in DB: {[dict(row) for row in all_keys]}")
-    
-    # Check if key exists and is active
+    # SIMPLE VALIDATION - Check if key exists and is active
     cursor.execute('''
         SELECT * FROM api_keys 
         WHERE key_text = ? AND active = 1
@@ -102,18 +66,17 @@ def validate_api_key(api_key):
     
     if not key_data:
         conn.close()
-        print(f"Key not found or inactive: {api_key}")
+        print(f"❌ Key not found or inactive: '{api_key}'")
         return False, None, "API key not found or inactive"
     
-    print(f"Key found: {dict(key_data)}")
+    print(f"✅ Key found: ID={key_data['id']}, Key='{key_data['key_text']}', Active={key_data['active']}")
     
-    # Check expiry date
+    # Check expiry date (if exists)
     if key_data['expiry_date']:
-        from datetime import datetime
         today = datetime.now().strftime('%Y-%m-%d')
         if key_data['expiry_date'] < today:
             conn.close()
-            print(f"Key expired: {key_data['expiry_date']}")
+            print(f"❌ Key expired: {key_data['expiry_date']}")
             return False, key_data, "API key has expired"
     
     # Check daily limit
@@ -124,7 +87,7 @@ def validate_api_key(api_key):
         ''', (key_data['id'],))
         used_today = cursor.fetchone()[0]
         
-        print(f"Used today: {used_today}, Limit: {key_data['daily_limit']}")
+        print(f"📊 Used today: {used_today}, Limit: {key_data['daily_limit']}")
         
         if used_today >= key_data['daily_limit']:
             conn.close()
@@ -135,7 +98,7 @@ def validate_api_key(api_key):
 
 def log_usage(api_key_id, phone_number):
     """Log API usage to database"""
-    print(f"Logging usage for key_id: {api_key_id}, phone: {phone_number}")
+    print(f"📝 Logging usage for key_id: {api_key_id}, phone: {phone_number}")
     
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -152,7 +115,7 @@ def log_usage(api_key_id, phone_number):
     
     conn.commit()
     conn.close()
-    print("Usage logged successfully")
+    print("✅ Usage logged successfully")
 
 def clean_text(t):
     if not t:
@@ -216,7 +179,7 @@ def fetch():
     provided_key = request.args.get("key", "").strip()
     num = request.args.get("num", "").strip()
 
-    print(f"API Request - Key: {provided_key}, Number: {num}")
+    print(f"🚀 API Request - Key: '{provided_key}', Number: '{num}'")
 
     # Validate API key from database
     is_valid, key_data, error_msg = validate_api_key(provided_key)
@@ -281,32 +244,23 @@ def home_redirect():
     from flask import redirect
     return redirect("/admin")
 
-@app.route("/debug-db", methods=["GET"])
-def debug_db():
-    """Debug endpoint to check database state"""
+@app.route("/debug-keys", methods=["GET"])
+def debug_keys():
+    """Debug endpoint to check keys in database"""
     conn = get_db_connection()
-    conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
-    # Get all keys
-    cursor.execute('SELECT * FROM api_keys')
-    keys = [dict(row) for row in cursor.fetchall()]
-    
-    # Get usage stats
-    cursor.execute('SELECT COUNT(*) as total_logs FROM usage_logs')
-    total_logs = cursor.fetchone()[0]
+    cursor.execute('SELECT key_text, active, expiry_date FROM api_keys')
+    keys = cursor.fetchall()
     
     conn.close()
     
+    keys_list = [{"key": key[0], "active": bool(key[1]), "expiry": key[2]} for key in keys]
+    
     return {
-        "database_path": get_db_path(),
-        "total_keys": len(keys),
-        "total_usage_logs": total_logs,
-        "keys": keys
+        "total_keys": len(keys_list),
+        "keys": keys_list
     }
-
-# Initialize database on startup
-init_db()
 
 # Vercel requires this
 if __name__ == "__main__":
