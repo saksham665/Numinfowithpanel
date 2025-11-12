@@ -20,6 +20,10 @@
       "dest": "/api/admin.py"
     },
     {
+      "src": "/debug-db",
+      "dest": "/api/admin.py"
+    },
+    {
       "src": "/",
       "dest": "/api/admin.py"
     }
