@@ -34,13 +34,13 @@ BASE_HEADERS = {
 
 EMOJI_RE = re.compile(r"[\U0001F000-\U0010FFFF]+", flags=re.UNICODE)
 
-# Database setup - Use absolute path in Vercel
+# Database setup - Shared between admin and API
 def get_db_path():
     return '/tmp/wrapped_api.db'
 
 def init_db():
     db_path = get_db_path()
-    print(f"Initializing database at: {db_path}")  # Debug
+    print(f"Initializing database at: {db_path}")
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
@@ -67,11 +67,6 @@ def init_db():
         )
     ''')
     
-    # Check if we have any keys
-    cursor.execute('SELECT COUNT(*) FROM api_keys')
-    count = cursor.fetchone()[0]
-    print(f"Total keys in database: {count}")  # Debug
-    
     conn.commit()
     conn.close()
 
@@ -86,31 +81,40 @@ def validate_api_key(api_key):
     if not api_key:
         return False, None, "API key is required"
     
-    print(f"Validating API key: {api_key}")  # Debug
+    print(f"Validating API key: {api_key}")
     
     conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
-    # First, let's see what keys we have in database
-    cursor.execute('SELECT key_text, active FROM api_keys')
+    # Debug: Print all keys in database
+    cursor.execute('SELECT key_text, active, expiry_date FROM api_keys')
     all_keys = cursor.fetchall()
-    print(f"All keys in DB: {[dict(row) for row in all_keys]}")  # Debug
+    print(f"All keys in DB: {[dict(row) for row in all_keys]}")
     
+    # Check if key exists and is active
     cursor.execute('''
         SELECT * FROM api_keys 
-        WHERE key_text = ? AND active = 1 
-        AND (expiry_date = '' OR expiry_date > date('now'))
+        WHERE key_text = ? AND active = 1
     ''', (api_key,))
     
     key_data = cursor.fetchone()
     
     if not key_data:
         conn.close()
-        print(f"Key not found or inactive: {api_key}")  # Debug
+        print(f"Key not found or inactive: {api_key}")
         return False, None, "API key not found or inactive"
     
-    print(f"Key found: {dict(key_data)}")  # Debug
+    print(f"Key found: {dict(key_data)}")
+    
+    # Check expiry date
+    if key_data['expiry_date']:
+        from datetime import datetime
+        today = datetime.now().strftime('%Y-%m-%d')
+        if key_data['expiry_date'] < today:
+            conn.close()
+            print(f"Key expired: {key_data['expiry_date']}")
+            return False, key_data, "API key has expired"
     
     # Check daily limit
     if key_data['daily_limit'] > 0:
@@ -120,7 +124,7 @@ def validate_api_key(api_key):
         ''', (key_data['id'],))
         used_today = cursor.fetchone()[0]
         
-        print(f"Used today: {used_today}, Limit: {key_data['daily_limit']}")  # Debug
+        print(f"Used today: {used_today}, Limit: {key_data['daily_limit']}")
         
         if used_today >= key_data['daily_limit']:
             conn.close()
@@ -131,7 +135,7 @@ def validate_api_key(api_key):
 
 def log_usage(api_key_id, phone_number):
     """Log API usage to database"""
-    print(f"Logging usage for key_id: {api_key_id}, phone: {phone_number}")  # Debug
+    print(f"Logging usage for key_id: {api_key_id}, phone: {phone_number}")
     
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -148,7 +152,7 @@ def log_usage(api_key_id, phone_number):
     
     conn.commit()
     conn.close()
-    print("Usage logged successfully")  # Debug
+    print("Usage logged successfully")
 
 def clean_text(t):
     if not t:
@@ -212,7 +216,7 @@ def fetch():
     provided_key = request.args.get("key", "").strip()
     num = request.args.get("num", "").strip()
 
-    print(f"API Request - Key: {provided_key}, Number: {num}")  # Debug
+    print(f"API Request - Key: {provided_key}, Number: {num}")
 
     # Validate API key from database
     is_valid, key_data, error_msg = validate_api_key(provided_key)
