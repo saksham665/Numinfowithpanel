@@ -22,7 +22,7 @@ ORIGINAL_APIS = {
 # AAPKE NEW API KEYS - AAP INHE CHANGE KAR SAKTE HO
 MY_KEYS = {
     "NUM": "trialkey",      # Mobile number API key - CHANGE KAR SAKTE HO
-    "FAMILY": "trialkeu",  # Family info API key - CHANGE KAR SAKTE HO  
+    "FAMILY": "trialkey",  # Family info API key - CHANGE KAR SAKTE HO  
     "VEHICLE": "trialkey" # Vehicle API key - CHANGE KAR SAKTE HO
 }
 
