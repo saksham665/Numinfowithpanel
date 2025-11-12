@@ -43,6 +43,41 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
+def init_db():
+    """Initialize database tables"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_text TEXT UNIQUE,
+                daily_limit INTEGER DEFAULT 0,
+                used_today INTEGER DEFAULT 0,
+                total_used INTEGER DEFAULT 0,
+                last_used TEXT DEFAULT '',
+                expiry_date TEXT DEFAULT '',
+                active INTEGER DEFAULT 1,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS usage_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                api_key_id INTEGER,
+                phone TEXT,
+                used_at TEXT DEFAULT (datetime('now'))
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        print("✅ Database initialized successfully")
+    except Exception as e:
+        print(f"❌ Database initialization failed: {e}")
+
 def validate_api_key(api_key):
     """
     Validate API key from database
@@ -51,71 +86,68 @@ def validate_api_key(api_key):
     if not api_key:
         return False, None, "API key is required"
     
-    print(f"🔑 Validating API key: '{api_key}'")
-    
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # SIMPLE VALIDATION - Check if key exists and is active
-    cursor.execute('''
-        SELECT * FROM api_keys 
-        WHERE key_text = ? AND active = 1
-    ''', (api_key,))
-    
-    key_data = cursor.fetchone()
-    
-    if not key_data:
-        conn.close()
-        print(f"❌ Key not found or inactive: '{api_key}'")
-        return False, None, "API key not found or inactive"
-    
-    print(f"✅ Key found: ID={key_data['id']}, Key='{key_data['key_text']}', Active={key_data['active']}")
-    
-    # Check expiry date (if exists)
-    if key_data['expiry_date']:
-        today = datetime.now().strftime('%Y-%m-%d')
-        if key_data['expiry_date'] < today:
-            conn.close()
-            print(f"❌ Key expired: {key_data['expiry_date']}")
-            return False, key_data, "API key has expired"
-    
-    # Check daily limit
-    if key_data['daily_limit'] > 0:
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # SIMPLE VALIDATION - Check if key exists and is active
         cursor.execute('''
-            SELECT COUNT(*) FROM usage_logs 
-            WHERE api_key_id = ? AND date(used_at) = date('now')
-        ''', (key_data['id'],))
-        used_today = cursor.fetchone()[0]
+            SELECT * FROM api_keys 
+            WHERE key_text = ? AND active = 1
+        ''', (api_key,))
         
-        print(f"📊 Used today: {used_today}, Limit: {key_data['daily_limit']}")
+        key_data = cursor.fetchone()
+        conn.close()
         
-        if used_today >= key_data['daily_limit']:
+        if not key_data:
+            return False, None, "API key not found or inactive"
+        
+        # Check expiry date (if exists)
+        if key_data['expiry_date']:
+            today = datetime.now().strftime('%Y-%m-%d')
+            if key_data['expiry_date'] < today:
+                return False, key_data, "API key has expired"
+        
+        # Check daily limit
+        if key_data['daily_limit'] > 0:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT COUNT(*) FROM usage_logs 
+                WHERE api_key_id = ? AND date(used_at) = date('now')
+            ''', (key_data['id'],))
+            used_today = cursor.fetchone()[0]
             conn.close()
-            return False, key_data, f"Daily limit exceeded. Used: {used_today}/{key_data['daily_limit']}"
-    
-    conn.close()
-    return True, key_data, None
+            
+            if used_today >= key_data['daily_limit']:
+                return False, key_data, f"Daily limit exceeded. Used: {used_today}/{key_data['daily_limit']}"
+        
+        return True, key_data, None
+        
+    except Exception as e:
+        print(f"❌ Database error in validate_api_key: {e}")
+        return False, None, "Database error"
 
 def log_usage(api_key_id, phone_number):
     """Log API usage to database"""
-    print(f"📝 Logging usage for key_id: {api_key_id}, phone: {phone_number}")
-    
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        INSERT INTO usage_logs (api_key_id, phone, used_at) 
-        VALUES (?, ?, datetime('now'))
-    ''', (api_key_id, phone_number))
-    
-    # Update last_used timestamp
-    cursor.execute('''
-        UPDATE api_keys SET last_used = datetime('now') WHERE id = ?
-    ''', (api_key_id,))
-    
-    conn.commit()
-    conn.close()
-    print("✅ Usage logged successfully")
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO usage_logs (api_key_id, phone, used_at) 
+            VALUES (?, ?, datetime('now'))
+        ''', (api_key_id, phone_number))
+        
+        # Update last_used timestamp
+        cursor.execute('''
+            UPDATE api_keys SET last_used = datetime('now') WHERE id = ?
+        ''', (api_key_id,))
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"❌ Error logging usage: {e}")
 
 def clean_text(t):
     if not t:
@@ -127,25 +159,29 @@ def clean_text(t):
     return t
 
 def parse_reply_html(reply_html):
-    soup = BeautifulSoup(reply_html, "html.parser")
-    rows = soup.find_all("div", class_="row")
-    data = {}
-    for r in rows:
-        lbl_el = r.find("div", class_="label")
-        val_el = r.find("div", class_="value")
-        label = clean_text(lbl_el.get_text(" ", strip=True)) if lbl_el else ""
-        value = clean_text(val_el.get_text(" ", strip=True)) if val_el else ""
-        key = re.sub(r"[^\w\s]", "", label).strip().lower().replace(" ", "_").replace(":", "")
-        if key:
-            data[key] = value
-    return data
+    try:
+        soup = BeautifulSoup(reply_html, "html.parser")
+        rows = soup.find_all("div", class_="row")
+        data = {}
+        for r in rows:
+            lbl_el = r.find("div", class_="label")
+            val_el = r.find("div", class_="value")
+            label = clean_text(lbl_el.get_text(" ", strip=True)) if lbl_el else ""
+            value = clean_text(val_el.get_text(" ", strip=True)) if val_el else ""
+            key = re.sub(r"[^\w\s]", "", label).strip().lower().replace(" ", "_").replace(":", "")
+            if key:
+                data[key] = value
+        return data
+    except Exception as e:
+        print(f"❌ Error parsing HTML: {e}")
+        return {}
 
 def attempt_js_cookie(page_html):
-    hexvals = re.findall(r'toNumbers\(\s*"([0-9a-fA-F]+)"\s*\)', page_html)
-    if len(hexvals) < 3:
-        return None
-    a, b, c = hexvals[-3], hexvals[-2], hexvals[-1]
     try:
+        hexvals = re.findall(r'toNumbers\(\s*"([0-9a-fA-F]+)"\s*\)', page_html)
+        if len(hexvals) < 3:
+            return None
+        a, b, c = hexvals[-3], hexvals[-2], hexvals[-1]
         key_bytes = binascii.unhexlify(a)
         iv_bytes = binascii.unhexlify(b)
         cipher_bytes = binascii.unhexlify(c)
@@ -155,7 +191,8 @@ def attempt_js_cookie(page_html):
         except Exception:
             plain = dec.rstrip(b"\x00").rstrip()
         return binascii.hexlify(plain).decode()
-    except Exception:
+    except Exception as e:
+        print(f"❌ JS cookie decryption failed: {e}")
         return None
 
 def make_json_response(payload_dict, status=200):
@@ -176,67 +213,66 @@ def upstream_post_number(num, cookie_value=None):
 
 @app.route("/fetch", methods=["GET"])
 def fetch():
-    provided_key = request.args.get("key", "").strip()
-    num = request.args.get("num", "").strip()
-
-    print(f"🚀 API Request - Key: '{provided_key}', Number: '{num}'")
-
-    # Validate API key from database
-    is_valid, key_data, error_msg = validate_api_key(provided_key)
-    if not is_valid:
-        return make_json_response({"ok": False, "error": error_msg}, status=401)
-
-    # Validate phone number
-    if not re.fullmatch(r"\d{10}", num):
-        return make_json_response({"ok": False, "error": "Provide a valid 10-digit phone number in ?num= parameter."}, status=400)
-
-    # Call upstream (first try without cookie header; if JS challenge appears, try to solve and retry with cookie)
     try:
-        resp = upstream_post_number(num)
-    except Exception as e:
-        logging.exception("Upstream request failed (initial)")
-        return make_json_response({"ok": False, "error": f"Upstream request failed: {str(e)}"}, status=502)
+        provided_key = request.args.get("key", "").strip()
+        num = request.args.get("num", "").strip()
 
-    # Try parse upstream JSON; if there's a JS challenge, attempt cookie solution and retry once
-    try:
-        upstream_json = resp.json()
-    except ValueError:
-        # Attempt to extract/decrypt __test cookie from the returned page and retry
-        cookie = attempt_js_cookie(resp.text)
-        if not cookie:
-            logging.warning("JS challenge present and not solvable (no cookie extracted)")
-            return make_json_response({"ok": False, "error": "JS challenge not solvable."}, status=502)
-        
-        # Build cookie header with __test value
-        cookie_header_value = f"__test={cookie}"
+        # Validate API key from database
+        is_valid, key_data, error_msg = validate_api_key(provided_key)
+        if not is_valid:
+            return make_json_response({"ok": False, "error": error_msg}, status=401)
+
+        # Validate phone number
+        if not re.fullmatch(r"\d{10}", num):
+            return make_json_response({"ok": False, "error": "Provide a valid 10-digit phone number in ?num= parameter."}, status=400)
+
+        # Call upstream (first try without cookie header; if JS challenge appears, try to solve and retry with cookie)
         try:
-            resp = upstream_post_number(num, cookie_value=cookie_header_value)
-            upstream_json = resp.json()
+            resp = upstream_post_number(num)
         except Exception as e:
-            logging.exception("Upstream failed after solving cookie")
-            return make_json_response({"ok": False, "error": f"Upstream request failed after cookie: {str(e)}"}, status=502)
+            return make_json_response({"ok": False, "error": f"Upstream request failed: {str(e)}"}, status=502)
 
-    # Extract results
-    results = []
-    if isinstance(upstream_json, dict) and "reply" in upstream_json:
-        results.append(parse_reply_html(upstream_json["reply"]))
-    elif isinstance(upstream_json, dict) and "replies" in upstream_json:
-        for rhtml in upstream_json["replies"]:
-            results.append(parse_reply_html(rhtml))
-    else:
-        logging.warning("Upstream returned unexpected structure")
-        return make_json_response({"ok": False, "error": "Upstream did not return expected data."}, status=502)
+        # Try parse upstream JSON; if there's a JS challenge, attempt cookie solution and retry once
+        try:
+            upstream_json = resp.json()
+        except ValueError:
+            # Attempt to extract/decrypt __test cookie from the returned page and retry
+            cookie = attempt_js_cookie(resp.text)
+            if not cookie:
+                return make_json_response({"ok": False, "error": "JS challenge not solvable."}, status=502)
+            
+            # Build cookie header with __test value
+            cookie_header_value = f"__test={cookie}"
+            try:
+                resp = upstream_post_number(num, cookie_value=cookie_header_value)
+                upstream_json = resp.json()
+            except Exception as e:
+                return make_json_response({"ok": False, "error": f"Upstream request failed after cookie: {str(e)}"}, status=502)
 
-    # Log successful usage
-    log_usage(key_data['id'], num)
+        # Extract results
+        results = []
+        if isinstance(upstream_json, dict) and "reply" in upstream_json:
+            results.append(parse_reply_html(upstream_json["reply"]))
+        elif isinstance(upstream_json, dict) and "replies" in upstream_json:
+            for rhtml in upstream_json["replies"]:
+                results.append(parse_reply_html(rhtml))
+        else:
+            return make_json_response({"ok": False, "error": "Upstream did not return expected data."}, status=502)
 
-    # Top-level payload: include source_developer only once (top-level)
-    payload = {
-        "ok": True,
-        "results": results,
-        "source_developer": SOURCE_NAME
-    }
-    return make_json_response(payload, status=200)
+        # Log successful usage
+        log_usage(key_data['id'], num)
+
+        # Top-level payload: include source_developer only once (top-level)
+        payload = {
+            "ok": True,
+            "results": results,
+            "source_developer": SOURCE_NAME
+        }
+        return make_json_response(payload, status=200)
+        
+    except Exception as e:
+        print(f"❌ Unexpected error in /fetch: {e}")
+        return make_json_response({"ok": False, "error": "Internal server error"}, status=500)
 
 @app.route("/", methods=["GET"])
 def home_redirect():
@@ -247,20 +283,30 @@ def home_redirect():
 @app.route("/debug-keys", methods=["GET"])
 def debug_keys():
     """Debug endpoint to check keys in database"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute('SELECT key_text, active, expiry_date FROM api_keys')
-    keys = cursor.fetchall()
-    
-    conn.close()
-    
-    keys_list = [{"key": key[0], "active": bool(key[1]), "expiry": key[2]} for key in keys]
-    
-    return {
-        "total_keys": len(keys_list),
-        "keys": keys_list
-    }
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT key_text, active, expiry_date FROM api_keys')
+        keys = cursor.fetchall()
+        
+        conn.close()
+        
+        keys_list = [{"key": key[0], "active": bool(key[1]), "expiry": key[2]} for key in keys]
+        
+        return {
+            "ok": True,
+            "total_keys": len(keys_list),
+            "keys": keys_list
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e)
+        }, 500
+
+# Initialize database on startup
+init_db()
 
 # Vercel requires this
 if __name__ == "__main__":
